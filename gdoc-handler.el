@@ -1,10 +1,10 @@
 ;;; gdoc-handler.el --- Efficient .gdoc handler with caching -*- lexical-binding: t; -*-
 
-;; Author: Your Name <you@example.com>
+;; Author: Martin Bari Garnier <martbari.g@gmail.com>
 ;; Version: 0.1
 ;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: convenience, files
-;; URL: https://github.com/yourusername/gdoc-handler
+;; URL: https://github.com/MartinBaGar
 
 ;;; Commentary:
 
