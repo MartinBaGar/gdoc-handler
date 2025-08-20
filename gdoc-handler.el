@@ -38,12 +38,13 @@
 
 (defun gdoc-handler-transform-path (gdoc-path)
   "Transform filesystem path to rclone remote path."
-  (let ((relative-path (cond
-                        ((string-match "/mnt/g/\\.shortcut-targets-by-id/[^/]+/\\(.*\\)" gdoc-path)
-                         (concat "remote:" (match-string 1 gdoc-path)))
-                        ((string-match "/mnt/g/\\(.*\\)" gdoc-path)
-                         (concat "remote:" (match-string 1 gdoc-path)))
-                        (t gdoc-path))))
+  (let ((relative-path
+         (cond
+          ((string-match "/mnt/g/\\.shortcut-targets-by-id/[^/]+/\\(.*\\)" gdoc-path)
+           (concat "remote:" (match-string 1 gdoc-path)))
+          ((string-match "/mnt/g/\\(.*\\)" gdoc-path)
+           (concat "remote:" (match-string 1 gdoc-path)))
+          (t gdoc-path))))
     (replace-regexp-in-string
      "\\([0-9]+\\)\\.[ ]+\\([^/]+\\)/" "\\1. \"\\2\"/"
      (replace-regexp-in-string "\\.gdoc$" ".docx" relative-path))))
@@ -58,22 +59,23 @@
 (defun gdoc-handler-download-and-convert (rclone-path cache-file)
   "Download .gdoc as docx and convert to text, saving to CACHE-FILE."
   (let* ((user (or (getenv "SUDO_USER") (getenv "USER") "mabagar"))
-         (rclone-cmd (format "sudo -u %s rclone copy '%s' /tmp/ --drive-export-formats docx"
-                             user rclone-path)))
+         (rclone-cmd (format "sudo -u %s rclone copy %s /tmp/ --drive-export-formats docx"
+                             user (shell-quote-argument rclone-path))))
     (message "[gdoc] Running: %s" rclone-cmd)
     (unwind-protect
-        (progn
-          (let ((download-result (shell-command rclone-cmd))
-                (temp-docx nil))
-            (setq temp-docx (gdoc-handler-latest-docx))
-            (if (and (= download-result 0) temp-docx (file-exists-p temp-docx))
-                (let ((convert-cmd (format "pandoc '%s' -t plain -o '%s'" temp-docx cache-file))
-                      (convert-result nil))
-                  (setq convert-result (shell-command convert-cmd))
-                  (if (and (= convert-result 0) (file-exists-p cache-file))
-                      cache-file
-                    (error "[gdoc] Failed to convert docx to text. Pandoc result: %d" convert-result)))
-              (error "[gdoc] Failed to download file. Rclone result: %d" download-result))))
+        (let ((download-result (shell-command rclone-cmd))
+              (temp-docx nil))
+          (setq temp-docx (gdoc-handler-latest-docx))
+          (if (and (= download-result 0) temp-docx (file-exists-p temp-docx))
+              (let ((convert-cmd (format "pandoc %s -t plain -o %s"
+                                         (shell-quote-argument temp-docx)
+                                         (shell-quote-argument cache-file)))
+                    (convert-result nil))
+                (setq convert-result (shell-command convert-cmd))
+                (if (and (= convert-result 0) (file-exists-p cache-file))
+                    cache-file
+                  (error "[gdoc] Failed to convert docx to text. Pandoc result: %d" convert-result)))
+            (error "[gdoc] Failed to download file. Rclone result: %d" download-result)))
       ;; Cleanup temporary docx files
       (dolist (f (directory-files "/tmp/" t "\\.docx$"))
         (ignore-errors (delete-file f))))))
@@ -109,8 +111,7 @@
             (gdoc-handler-download-and-convert rclone-path cache-file)
             (switch-to-buffer (find-file-noselect cache-file))
             (read-only-mode 1)
-            (message "[gdoc] Downloaded and opened %s (read-only)"
-                     (file-name-nondirectory cache-file)))
+            (message "[gdoc] Downloaded and opened %s (read-only)" (file-name-nondirectory cache-file)))
         (error
          (message "[gdoc] Error: %s" (error-message-string err)))))))
 
