@@ -13,37 +13,45 @@
 
 ;;; Code:
 
-(defgroup gdoc-handler nil
-  "Handle .gdoc files via rclone and pandoc."
-  :group 'files
-  :prefix "gdoc-")
+(defvar gdoc-cache-dir "/tmp/gdoc-cache"
+  "Directory for caching downloaded .gdoc files.")
 
-(defcustom gdoc-handler-cache-dir "/tmp/gdoc-cache"
-  "Directory for caching downloaded .gdoc files."
-  :type 'directory
-  :group 'gdoc-handler)
+(defvar gdoc-cache-ttl (* 60 60)  ; 1 hour in seconds
+  "Time-to-live for cached .gdoc files in seconds.")
 
-(defun gdoc-handler-ensure-cache-dir ()
+(defun gdoc-ensure-cache-dir ()
   "Ensure the cache directory exists."
   (unless (file-exists-p gdoc-cache-dir)
     (make-directory gdoc-cache-dir t)))
 
-(defun gdoc-handler-cache-key (gdoc-path)
+(defun gdoc-cache-key (gdoc-path)
   "Generate a unique cache key for a .gdoc file."
   (secure-hash 'md5 gdoc-path))
 
-(defun gdoc-handler-cache-file-path (cache-key)
+(defun gdoc-cache-file-path (cache-key)
   "Get the full path for a cached file."
-  (expand-file-name (concat cache-key ".org") gdoc-cache-dir))
+  (expand-file-name (concat cache-key ".txt") gdoc-cache-dir))
 
-(defun gdoc-handler-transform-path (gdoc-path)
+(defun gdoc-cache-valid-p (cache-file)
+  "Check if cached file is still valid (exists and not expired)."
+  (and (file-exists-p cache-file)
+       (let* ((file-time (nth 5 (file-attributes cache-file)))
+              (current-time (current-time))
+              (age (float-time (time-subtract current-time file-time))))
+         (< age gdoc-cache-ttl))))
+
+(defun gdoc-transform-path (gdoc-path)
   "Transform filesystem path to rclone remote path."
   (let ((relative-path (cond
+                        ;; Handle shared drives (.shortcut-targets-by-id)
                         ((string-match "/mnt/g/\\.shortcut-targets-by-id/[^/]+/\\(.*\\)" gdoc-path)
                          (concat "remote:" (match-string 1 gdoc-path)))
+                        ;; Handle regular Google Drive
                         ((string-match "/mnt/g/\\(.*\\)" gdoc-path)
                          (concat "remote:" (match-string 1 gdoc-path)))
+                        ;; Fallback
                         (t gdoc-path))))
+    ;; Convert .gdoc to .docx and fix directory names with quotes
     (replace-regexp-in-string
      "\\([0-9]+\\)\\.[ ]+\\([^/]+\\)/" "\\1. \"\\2\"/"
      (replace-regexp-in-string "\\.gdoc$" ".docx" relative-path))))
@@ -51,34 +59,40 @@
 (defun gdoc-latest-docx ()
   "Return the most recent .docx file in /tmp/, or nil if none."
   (car (sort (directory-files "/tmp/" t "\\.docx$")
-             (lambda (a b)
-               (time-less-p (nth 5 (file-attributes b))
-                            (nth 5 (file-attributes a)))))))
+             (lambda (a b) (time-less-p (nth 5 (file-attributes b))
+                                        (nth 5 (file-attributes a)))))))
 
 (defun gdoc-download-and-convert (rclone-path cache-file)
   "Download .gdoc as docx and convert to text, saving to CACHE-FILE."
   (let* ((user (or (getenv "SUDO_USER") (getenv "USER") "mabagar"))
+         ;; Use the working rclone command structure
          (rclone-cmd (format "sudo -u %s rclone copy '%s' /tmp/ --drive-export-formats docx"
                              user rclone-path)))
-    (message "[gdoc] Running: %s" rclone-cmd)
+
+    (message "Running: %s" rclone-cmd)
+
     (unwind-protect
         (progn
-          (let ((download-result (shell-command rclone-cmd))
+          ;; Download with rclone
+          (let ((download-result (shell-command rclone-cmd "*rclone-output*"))
                 (temp-docx nil))
             (setq temp-docx (gdoc-latest-docx))
             (if (and (= download-result 0) temp-docx (file-exists-p temp-docx))
-                (let ((convert-cmd (format "pandoc '%s' -t plain -o '%s'" temp-docx cache-file))
-                      (convert-result nil))
-                  (setq convert-result (shell-command convert-cmd))
-                  (if (and (= convert-result 0) (file-exists-p cache-file))
-                      cache-file
-                    (error "[gdoc] Failed to convert docx to text. Pandoc result: %d" convert-result)))
-              (error "[gdoc] Failed to download file. Rclone result: %d" download-result))))
+                ;; Convert with pandoc
+                (progn
+                  (message "Converting %s to text..." temp-docx)
+                  (let ((convert-cmd (format "pandoc '%s' -t plain -o '%s'" temp-docx cache-file))
+                        (convert-result nil))
+                    (setq convert-result (shell-command convert-cmd))
+                    (if (and (= convert-result 0) (file-exists-p cache-file))
+                        cache-file
+                      (error "Failed to convert docx to text. Pandoc result: %d" convert-result))))
+              (error "Failed to download file. Rclone result: %d. Check *rclone-output* buffer"
+                     download-result))))
       ;; Cleanup temporary docx files
       (dolist (f (directory-files "/tmp/" t "\\.docx$"))
         (ignore-errors (delete-file f))))))
 
-;;;###autoload
 (defun gdoc-handler ()
   "Handle .gdoc files efficiently with caching."
   (interactive)
@@ -86,8 +100,9 @@
          (cache-key (gdoc-cache-key gdoc-path))
          (cache-file (gdoc-cache-file-path cache-key))
          (rclone-path (gdoc-transform-path gdoc-path)))
-    (message "[gdoc] Original: %s" gdoc-path)
-    (message "[gdoc] Transformed: %s" rclone-path)
+
+    (message "Original: %s" gdoc-path)
+    (message "Transformed: %s" rclone-path)
 
     ;; Kill the .gdoc buffer immediately
     (kill-buffer (current-buffer))
@@ -95,37 +110,52 @@
     ;; Setup cache directory
     (gdoc-ensure-cache-dir)
 
-    ;; If cached, just open it
-    (if (file-exists-p cache-file)
+    ;; Check cache first
+    (if (gdoc-cache-valid-p cache-file)
         (progn
-          (message "[gdoc] Opening cached version...")
+          (message "Opening cached version...")
           (switch-to-buffer (find-file-noselect cache-file))
           (read-only-mode 1)
-          (message "[gdoc] Opened cached file (read-only)"))
-      ;; Not cached - download
-      (message "[gdoc] Downloading and converting .gdoc file...")
+          (message "Opened cached file (read-only)"))
+
+      ;; Not cached or expired - download
+      (message "Downloading and converting .gdoc file...")
       (condition-case err
           (progn
             (gdoc-download-and-convert rclone-path cache-file)
             (switch-to-buffer (find-file-noselect cache-file))
             (read-only-mode 1)
-            (message "[gdoc] Downloaded and opened %s (read-only)" (file-name-nondirectory cache-file)))
+            (message "Downloaded and opened %s (read-only)" (file-name-nondirectory cache-file)))
         (error
-         (message "[gdoc] Error: %s" (error-message-string err)))))))
+         (message "Error: %s" (error-message-string err))
+         (display-buffer "*rclone-output*"))))))
 
-;;;###autoload
-(defun gdoc-handler-clear-cache ()
+;; Auto-trigger for .gdoc files
+(add-to-list 'auto-mode-alist '("\\.gdoc\\'" . gdoc-handler))
+
+;; Debug function to test path transformation
+(defun gdoc-debug-path ()
+  "Debug function to test path transformation without downloading."
+  (interactive)
+  (let* ((gdoc-path (buffer-file-name))
+         (rclone-path (gdoc-transform-path gdoc-path))
+         (cache-key (gdoc-cache-key gdoc-path))
+         (cache-file (gdoc-cache-file-path cache-key)))
+    (message "Original: %s" gdoc-path)
+    (message "Transformed: %s" rclone-path)
+    (message "Cache key: %s" cache-key)
+    (message "Cache file: %s" cache-file)
+    (message "Test rclone ls: rclone ls '%s'" (file-name-directory rclone-path))))
+
+;; Optional: Clear cache command
+(defun gdoc-clear-cache ()
   "Clear all cached .gdoc files."
   (interactive)
   (when (file-exists-p gdoc-cache-dir)
     (let ((files (directory-files gdoc-cache-dir t "^[^.]")))
       (dolist (file files)
         (delete-file file))
-      (message "[gdoc] Cleared %d cached files" (length files)))))
-
-;; Automatically handle .gdoc files
-;;;###autoload
-(add-to-list 'auto-mode-alist '("\\.gdoc\\'" . gdoc-handler))
+      (message "Cleared %d cached files" (length files)))))
 
 (provide 'gdoc-handler)
 ;;; gdoc-handler.el ends here
